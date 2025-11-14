@@ -10,12 +10,12 @@ import pandas as pd
 
 DB_FILES = {
     "2025": {
-        "file": "Database2025_النظام_الجديد.csv",
+        "file": "Database2025.csv",
         "headers": {"seat": "seating_no", "name": "arabic_name", "degree": "total_degree"},
         "max_degree": 320.0
     },
     "2024": {
-        "file": "Database2024_Stage_New_Search.csv",
+        "file": "Database2024.csv",
         "headers": {"seat": "رقم الجلوس", "name": "الاسم", "degree": "الدرجة"},
         "max_degree": 410.0
     }
