@@ -1,24 +1,28 @@
 from typing import Optional, List, Dict, Any
 import os
 import threading
+import re
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Path, Response, status
 from pydantic import BaseModel
 import pandas as pd
 
+
 DATA_LOCK = threading.Lock()
 DATAFRAME_IN_MEMORY: Optional[pd.DataFrame] = None
+
 CSV_FILE_DEFAULT = "Database2024_Stage_New_Search.csv"
 HEADERS_MAPPING = {"seat": "رقم الجلوس", "name": "الاسم", "degree": "الدرجة"}
 MAX_DEGREE_VALUE = 410.0
+
 
 app = FastAPI(title="Database2024 API")
 
 
 class SearchResponseItem(BaseModel):
-    seat: Any
-    name: Any
-    degree: Any
+    seat: Optional[Any]
+    name: Optional[Any]
+    degree: Optional[Any]
 
 
 class SearchResponse(BaseModel):
@@ -26,143 +30,263 @@ class SearchResponse(BaseModel):
     results: List[SearchResponseItem]
 
 
-def load_csv_to_memory(csv_path: str) -> pd.DataFrame:
-    dataframe = pd.read_csv(csv_path)
-    return dataframe
+def read_csv_from_path(csv_path: str) -> pd.DataFrame:
+    dataframe_loaded = pd.read_csv(csv_path)
+    return dataframe_loaded
 
 
-def ensure_data_loaded() -> None:
+def detect_columns_from_dataframe(dataframe: pd.DataFrame) -> Dict[str, Optional[str]]:
+    detected_name_column: Optional[str] = None
+    detected_seat_column: Optional[str] = None
+    detected_degree_column: Optional[str] = None
+
+    column_names = list(dataframe.columns)
+
+    for column_name in column_names:
+        normalized_column = column_name.strip().lower()
+
+        is_name_like = False
+        is_seat_like = False
+        is_degree_like = False
+
+        if normalized_column == "name":
+            is_name_like = True
+
+        if normalized_column == "full_name":
+            is_name_like = True
+
+        if normalized_column == "student_name":
+            is_name_like = True
+
+        if normalized_column == "seat":
+            is_seat_like = True
+
+        if normalized_column == "seat_no":
+            is_seat_like = True
+
+        if normalized_column == "seat_number":
+            is_seat_like = True
+
+        if normalized_column == "roll":
+            is_seat_like = True
+
+        if normalized_column == "degree":
+            is_degree_like = True
+
+        if normalized_column == "score":
+            is_degree_like = True
+
+        if normalized_column == "marks":
+            is_degree_like = True
+
+        if is_name_like:
+            detected_name_column = column_name
+
+        if is_seat_like:
+            detected_seat_column = column_name
+
+        if is_degree_like:
+            detected_degree_column = column_name
+
+    if detected_name_column is None:
+        for column_name in column_names:
+            normalized_column = column_name.lower()
+            contains_name_word = "name" in normalized_column
+            if contains_name_word:
+                detected_name_column = column_name
+                break
+
+    if detected_seat_column is None:
+        for column_name in column_names:
+            normalized_column = column_name.lower()
+            contains_seat_word = ("seat" in normalized_column) or ("roll" in normalized_column)
+            if contains_seat_word:
+                detected_seat_column = column_name
+                break
+
+    if detected_degree_column is None:
+        for column_name in column_names:
+            normalized_column = column_name.lower()
+            contains_degree_word = ("deg" in normalized_column) or ("score" in normalized_column) or ("mark" in normalized_column)
+            if contains_degree_word:
+                detected_degree_column = column_name
+                break
+
+    return {
+        "name_column": detected_name_column,
+        "seat_column": detected_seat_column,
+        "degree_column": detected_degree_column
+    }
+
+
+def ensure_dataframe_loaded() -> None:
     global DATAFRAME_IN_MEMORY
-    if DATAFRAME_IN_MEMORY is None:
-        csv_path = os.environ.get("DATABASE_CSV_PATH", CSV_FILE_DEFAULT)
-        if not os.path.exists(csv_path):
-            raise FileNotFoundError(f"CSV file not found at: {csv_path}")
-        loaded_frame = load_csv_to_memory(csv_path)
+
+    with DATA_LOCK:
+        dataframe_is_none = DATAFRAME_IN_MEMORY is None
+
+    if dataframe_is_none:
+        csv_path_env = os.environ.get("DATABASE_CSV_PATH")
+        if csv_path_env is None:
+            csv_path_env = CSV_FILE_DEFAULT
+
+        file_exists_at_path = os.path.exists(csv_path_env)
+        if not file_exists_at_path:
+            raise FileNotFoundError(f"CSV file not found at: {csv_path_env}")
+
+        loaded_dataframe = read_csv_from_path(csv_path_env)
+
         with DATA_LOCK:
-            DATAFRAME_IN_MEMORY = loaded_frame
+            DATAFRAME_IN_MEMORY = loaded_dataframe
 
 
 @app.on_event("startup")
-def startup_load_data() -> None:
+def load_data_on_startup() -> None:
     try:
-        ensure_data_loaded()
+        ensure_dataframe_loaded()
     except FileNotFoundError:
         pass
 
 
 @app.post("/realode")
-def reload_csv() -> Dict[str, Any]:
+def reload_csv_into_memory() -> Dict[str, Any]:
     global DATAFRAME_IN_MEMORY
-    csv_path = os.environ.get("DATABASE_CSV_PATH", CSV_FILE_DEFAULT)
-    if not os.path.exists(csv_path):
+
+    csv_path_env = os.environ.get("DATABASE_CSV_PATH")
+    if csv_path_env is None:
+        csv_path_env = CSV_FILE_DEFAULT
+
+    file_exists_at_path = os.path.exists(csv_path_env)
+    if not file_exists_at_path:
         raise HTTPException(status_code=404, detail="CSV file not found")
-    new_frame = load_csv_to_memory(csv_path)
+
+    new_dataframe = read_csv_from_path(csv_path_env)
+
     with DATA_LOCK:
-        DATAFRAME_IN_MEMORY = new_frame
-    return {
+        DATAFRAME_IN_MEMORY = new_dataframe
+
+    loaded_rows_count = len(DATAFRAME_IN_MEMORY.index)
+
+    response_payload = {
         "status": "ok",
         "message": "CSV reloaded into memory",
-        "loaded_rows": len(DATAFRAME_IN_MEMORY.index)
+        "loaded_rows": loaded_rows_count
     }
 
+    return response_payload
 
-@app.get("/2024/search", response_model=SearchResponse)
-def search_2024(
-    term: str = Query(..., description="Search term: name or seat"),
-    by: Optional[str] = Query(None, description="Specify 'name' or 'seat' to limit search"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum number of results to return")
+
+def is_string_all_digits(input_string: str) -> bool:
+    stripped_string = input_string.strip()
+    match_result = re.fullmatch(r"\d+", stripped_string)
+    is_digits = match_result is not None
+    return is_digits
+
+
+def perform_name_search(dataframe: pd.DataFrame, name_column: str, search_term: str, result_limit: int) -> pd.DataFrame:
+    series_values = dataframe[name_column].astype(str)
+    boolean_mask = series_values.str.contains(search_term, case=False, na=False)
+    matched_rows = dataframe[boolean_mask]
+    limited_rows = matched_rows.head(result_limit)
+    return limited_rows
+
+
+def perform_seat_search(dataframe: pd.DataFrame, seat_column: str, search_term: str, result_limit: int) -> pd.DataFrame:
+    series_values = dataframe[seat_column].astype(str)
+    stripped_series_values = series_values.str.strip()
+    exact_match_mask = stripped_series_values == search_term
+    matched_by_exact = dataframe[exact_match_mask]
+
+    if len(matched_by_exact.index) > 0:
+        limited_rows = matched_by_exact.head(result_limit)
+        return limited_rows
+
+    contains_mask = stripped_series_values.str.contains(search_term, case=False, na=False)
+    matched_by_contains = dataframe[contains_mask]
+    limited_rows = matched_by_contains.head(result_limit)
+    return limited_rows
+
+
+@app.get("/2024/search/{query}", response_model=SearchResponse)
+def search_2024_by_path(
+    query: str = Path(..., description="Search term (seat number or name)"),
+    limit: int = 100
 ) -> Dict[str, Any]:
-    ensure_data_loaded()
+    ensure_dataframe_loaded()
+
     with DATA_LOCK:
-        working_frame = DATAFRAME_IN_MEMORY.copy()
+        dataframe_copy = DATAFRAME_IN_MEMORY.copy()
 
-    column_names = list(working_frame.columns)
+    detected_columns = detect_columns_from_dataframe(dataframe_copy)
 
-    detected_name_column: Optional[str] = None
-    detected_seat_column: Optional[str] = None
-    detected_degree_column: Optional[str] = None
+    name_column_detected = detected_columns.get("name_column")
+    seat_column_detected = detected_columns.get("seat_column")
+    degree_column_detected = detected_columns.get("degree_column")
 
-    for column in column_names:
-        lowered = column.strip().lower()
-        if lowered in ("name", "full_name", "student_name"):
-            detected_name_column = column
-        if lowered in ("seat", "seat_no", "seat_number", "roll"):
-            detected_seat_column = column
-        if lowered in ("degree", "score", "marks"):
-            detected_degree_column = column
-
-    if detected_name_column is None:
-        for column in column_names:
-            if "name" in column.lower():
-                detected_name_column = column
-                break
-
-    if detected_seat_column is None:
-        for column in column_names:
-            if "seat" in column.lower() or "roll" in column.lower():
-                detected_seat_column = column
-                break
-
-    if detected_degree_column is None:
-        for column in column_names:
-            if "deg" in column.lower() or "score" in column.lower() or "mark" in column.lower():
-                detected_degree_column = column
-                break
-
-    if detected_name_column is None and detected_seat_column is None:
+    if name_column_detected is None and seat_column_detected is None:
         raise HTTPException(status_code=500, detail="CSV does not contain identifiable name or seat columns")
 
-    matches_frame = working_frame.iloc[0:0]
+    query_normalized = query.strip()
 
-    search_term = term.strip()
-    if by is None:
-        if detected_name_column is not None:
-            name_mask = working_frame[detected_name_column].astype(str).str.contains(search_term, case=False, na=False)
-            matches_frame = pd.concat([matches_frame, working_frame[name_mask]])
-        if detected_seat_column is not None:
-            seat_mask = working_frame[detected_seat_column].astype(str).str.contains(search_term, case=False, na=False)
-            matches_frame = pd.concat([matches_frame, working_frame[seat_mask]])
+    is_query_numeric = is_string_all_digits(query_normalized)
+
+    if is_query_numeric:
+        if seat_column_detected is None:
+            raise HTTPException(status_code=400, detail="Seat column not found in CSV")
+        matched_frame = perform_seat_search(
+            dataframe=dataframe_copy,
+            seat_column=seat_column_detected,
+            search_term=query_normalized,
+            result_limit=limit
+        )
     else:
-        search_by = by.strip().lower()
-        if search_by == "name":
-            if detected_name_column is None:
-                raise HTTPException(status_code=400, detail="Name column not found in CSV")
-            name_mask = working_frame[detected_name_column].astype(str).str.contains(search_term, case=False, na=False)
-            matches_frame = working_frame[name_mask]
-        elif search_by == "seat":
-            if detected_seat_column is None:
-                raise HTTPException(status_code=400, detail="Seat column not found in CSV")
-            seat_mask = working_frame[detected_seat_column].astype(str).str.contains(search_term, case=False, na=False)
-            matches_frame = working_frame[seat_mask]
-        else:
-            raise HTTPException(status_code=400, detail="Invalid 'by' parameter. Use 'name' or 'seat'")
+        if name_column_detected is None:
+            raise HTTPException(status_code=400, detail="Name column not found in CSV")
+        matched_frame = perform_name_search(
+            dataframe=dataframe_copy,
+            name_column=name_column_detected,
+            search_term=query_normalized,
+            result_limit=limit
+        )
 
-    if matches_frame.empty:
+    if matched_frame.empty:
         results_list: List[Dict[str, Any]] = []
     else:
-        limited_frame = matches_frame.head(limit)
         results_list = []
-        for _, row in limited_frame.iterrows():
-            seat_value = row[detected_seat_column] if detected_seat_column in row.index else None
-            name_value = row[detected_name_column] if detected_name_column in row.index else None
-            degree_value = row[detected_degree_column] if detected_degree_column in row.index else None
-            result_item = {
+        for _, row in matched_frame.iterrows():
+            seat_value = None
+            name_value = None
+            degree_value = None
+
+            if seat_column_detected in row.index:
+                seat_value = row[seat_column_detected]
+
+            if name_column_detected in row.index:
+                name_value = row[name_column_detected]
+
+            if degree_column_detected in row.index:
+                degree_value = row[degree_column_detected]
+
+            item = {
                 "seat": seat_value,
                 "name": name_value,
                 "degree": degree_value
             }
-            results_list.append(result_item)
+
+            results_list.append(item)
+
+    total_matches_count = len(matched_frame.index)
 
     response_payload = {
         "meta": {
             "headers": HEADERS_MAPPING,
             "max_degree": MAX_DEGREE_VALUE,
             "columns_detected": {
-                "name_column": detected_name_column,
-                "seat_column": detected_seat_column,
-                "degree_column": detected_degree_column
+                "name_column": name_column_detected,
+                "seat_column": seat_column_detected,
+                "degree_column": degree_column_detected
             },
-            "total_matches": len(matches_frame.index)
+            "total_matches": total_matches_count
         },
         "results": results_list
     }
