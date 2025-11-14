@@ -3,7 +3,7 @@ import os
 import threading
 import re
 
-from fastapi import FastAPI, HTTPException, Path, Response, status
+from fastapi import FastAPI, HTTPException, Path
 from pydantic import BaseModel
 import pandas as pd
 
@@ -14,7 +14,6 @@ DATAFRAME_IN_MEMORY: Optional[pd.DataFrame] = None
 CSV_FILE_DEFAULT = "Database2024_Stage_New_Search.csv"
 HEADERS_MAPPING = {"seat": "رقم الجلوس", "name": "الاسم", "degree": "الدرجة"}
 MAX_DEGREE_VALUE = 410.0
-
 
 app = FastAPI(title="Database2024 API")
 
@@ -31,7 +30,58 @@ class SearchResponse(BaseModel):
 
 
 def read_csv_from_path(csv_path: str) -> pd.DataFrame:
-    dataframe_loaded = pd.read_csv(csv_path)
+    try:
+        dataframe_loaded = pd.read_csv(
+            csv_path,
+            encoding="utf-8-sig",
+            header=0,
+            dtype=str,
+            low_memory=False,
+            keep_default_na=False
+        )
+    except Exception:
+        dataframe_loaded = pd.read_csv(
+            csv_path,
+            header=0,
+            dtype=str,
+            low_memory=False,
+            keep_default_na=False
+        )
+
+    column_names = list(dataframe_loaded.columns)
+
+    looks_like_no_header = True
+
+    for column_name in column_names:
+        if column_name is None:
+            continue
+
+        normalized_column = str(column_name).strip().lower()
+
+        if normalized_column == "":
+            continue
+
+        if not normalized_column.startswith("unnamed"):
+            looks_like_no_header = False
+            break
+
+    if looks_like_no_header:
+        first_row_values = dataframe_loaded.iloc[0].astype(str).tolist()
+
+        dataframe_with_row_headers = pd.read_csv(
+            csv_path,
+            header=None,
+            dtype=str,
+            low_memory=False,
+            keep_default_na=False
+        )
+
+        new_header = first_row_values
+
+        dataframe_with_row_headers.columns = new_header
+
+        dataframe_loaded = dataframe_with_row_headers.iloc[1:].reset_index(drop=True)
+
     return dataframe_loaded
 
 
@@ -42,73 +92,101 @@ def detect_columns_from_dataframe(dataframe: pd.DataFrame) -> Dict[str, Optional
 
     column_names = list(dataframe.columns)
 
+    arabic_name_candidate = str(HEADERS_MAPPING.get("name", "")).strip().lower()
+    arabic_seat_candidate = str(HEADERS_MAPPING.get("seat", "")).strip().lower()
+    arabic_degree_candidate = str(HEADERS_MAPPING.get("degree", "")).strip().lower()
+
+    english_name_keywords = ["name", "full_name", "student_name", "student", "candidate"]
+    english_seat_keywords = ["seat", "seat_no", "seat_number", "roll", "roll_no", "roll_number"]
+    english_degree_keywords = ["degree", "score", "marks", "mark", "result"]
+
     for column_name in column_names:
-        normalized_column = column_name.strip().lower()
+        normalized_column = str(column_name).strip().lower()
 
-        is_name_like = False
-        is_seat_like = False
-        is_degree_like = False
+        if detected_name_column is None:
+            exact_match_arabic_name = normalized_column == arabic_name_candidate and arabic_name_candidate != ""
+            contains_arabic_name = arabic_name_candidate in normalized_column and arabic_name_candidate != ""
+            exact_english_name = normalized_column in english_name_keywords
+            contains_english_name = any(keyword in normalized_column for keyword in english_name_keywords)
 
-        if normalized_column == "name":
-            is_name_like = True
+            if exact_match_arabic_name:
+                detected_name_column = column_name
+                continue
 
-        if normalized_column == "full_name":
-            is_name_like = True
+            if contains_arabic_name:
+                detected_name_column = column_name
+                continue
 
-        if normalized_column == "student_name":
-            is_name_like = True
+            if exact_english_name:
+                detected_name_column = column_name
+                continue
 
-        if normalized_column == "seat":
-            is_seat_like = True
+            if contains_english_name:
+                detected_name_column = column_name
+                continue
 
-        if normalized_column == "seat_no":
-            is_seat_like = True
+        if detected_seat_column is None:
+            exact_match_arabic_seat = normalized_column == arabic_seat_candidate and arabic_seat_candidate != ""
+            contains_arabic_seat = arabic_seat_candidate in normalized_column and arabic_seat_candidate != ""
+            exact_english_seat = normalized_column in english_seat_keywords
+            contains_english_seat = any(keyword in normalized_column for keyword in english_seat_keywords)
 
-        if normalized_column == "seat_number":
-            is_seat_like = True
+            if exact_match_arabic_seat:
+                detected_seat_column = column_name
+                continue
 
-        if normalized_column == "roll":
-            is_seat_like = True
+            if contains_arabic_seat:
+                detected_seat_column = column_name
+                continue
 
-        if normalized_column == "degree":
-            is_degree_like = True
+            if exact_english_seat:
+                detected_seat_column = column_name
+                continue
 
-        if normalized_column == "score":
-            is_degree_like = True
+            if contains_english_seat:
+                detected_seat_column = column_name
+                continue
 
-        if normalized_column == "marks":
-            is_degree_like = True
+        if detected_degree_column is None:
+            exact_match_arabic_degree = normalized_column == arabic_degree_candidate and arabic_degree_candidate != ""
+            contains_arabic_degree = arabic_degree_candidate in normalized_column and arabic_degree_candidate != ""
+            exact_english_degree = normalized_column in english_degree_keywords
+            contains_english_degree = any(keyword in normalized_column for keyword in english_degree_keywords)
 
-        if is_name_like:
-            detected_name_column = column_name
+            if exact_match_arabic_degree:
+                detected_degree_column = column_name
+                continue
 
-        if is_seat_like:
-            detected_seat_column = column_name
+            if contains_arabic_degree:
+                detected_degree_column = column_name
+                continue
 
-        if is_degree_like:
-            detected_degree_column = column_name
+            if exact_english_degree:
+                detected_degree_column = column_name
+                continue
+
+            if contains_english_degree:
+                detected_degree_column = column_name
+                continue
 
     if detected_name_column is None:
         for column_name in column_names:
-            normalized_column = column_name.lower()
-            contains_name_word = "name" in normalized_column
-            if contains_name_word:
+            normalized_column = str(column_name).strip().lower()
+            if "name" in normalized_column or "اسم" in normalized_column:
                 detected_name_column = column_name
                 break
 
     if detected_seat_column is None:
         for column_name in column_names:
-            normalized_column = column_name.lower()
-            contains_seat_word = ("seat" in normalized_column) or ("roll" in normalized_column)
-            if contains_seat_word:
+            normalized_column = str(column_name).strip().lower()
+            if "seat" in normalized_column or "roll" in normalized_column or "جلوس" in normalized_column or "رقم" in normalized_column:
                 detected_seat_column = column_name
                 break
 
     if detected_degree_column is None:
         for column_name in column_names:
-            normalized_column = column_name.lower()
-            contains_degree_word = ("deg" in normalized_column) or ("score" in normalized_column) or ("mark" in normalized_column)
-            if contains_degree_word:
+            normalized_column = str(column_name).strip().lower()
+            if "deg" in normalized_column or "score" in normalized_column or "mark" in normalized_column or "درجة" in normalized_column:
                 detected_degree_column = column_name
                 break
 
@@ -132,7 +210,7 @@ def ensure_dataframe_loaded() -> None:
 
         file_exists_at_path = os.path.exists(csv_path_env)
         if not file_exists_at_path:
-            raise FileNotFoundError(f"CSV file not found at: {csv_path_env}")
+            raise FileNotFoundError(csv_path_env)
 
         loaded_dataframe = read_csv_from_path(csv_path_env)
 
@@ -233,6 +311,7 @@ def search_2024_by_path(
     if is_query_numeric:
         if seat_column_detected is None:
             raise HTTPException(status_code=400, detail="Seat column not found in CSV")
+
         matched_frame = perform_seat_search(
             dataframe=dataframe_copy,
             seat_column=seat_column_detected,
@@ -242,6 +321,7 @@ def search_2024_by_path(
     else:
         if name_column_detected is None:
             raise HTTPException(status_code=400, detail="Name column not found in CSV")
+
         matched_frame = perform_name_search(
             dataframe=dataframe_copy,
             name_column=name_column_detected,
