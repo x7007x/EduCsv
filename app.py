@@ -3,19 +3,33 @@ import os
 import threading
 import re
 
-from fastapi import FastAPI, HTTPException, Path
+from fastapi import FastAPI, HTTPException, Path, Query
 from pydantic import BaseModel
 import pandas as pd
 
 
+DB_FILES = {
+    "2025": {
+        "file": "Database.csv",
+        "headers": {"seat": "seating_no", "name": "arabic_name", "degree": "total_degree"},
+        "max_degree": 320.0
+    },
+    "2024": {
+        "file": "Database2024.csv",
+        "headers": {"seat": "رقم الجلوس", "name": "الاسم", "degree": "الدرجة"},
+        "max_degree": 410.0
+    }
+}
+
+
 DATA_LOCK = threading.Lock()
-DATAFRAME_IN_MEMORY: Optional[pd.DataFrame] = None
+DATAFRAME_CACHE: Dict[str, Optional[pd.DataFrame]] = {
+    year_key: None
+    for year_key in DB_FILES.keys()
+}
 
-CSV_FILE_DEFAULT = "Database2024_Stage_New_Search.csv"
-HEADERS_MAPPING = {"seat": "رقم الجلوس", "name": "الاسم", "degree": "الدرجة"}
-MAX_DEGREE_VALUE = 410.0
 
-app = FastAPI(title="Database2024 API")
+app = FastAPI(title="Multi-year Database API")
 
 
 class SearchResponseItem(BaseModel):
@@ -24,9 +38,13 @@ class SearchResponseItem(BaseModel):
     degree: Optional[Any]
 
 
+class ResultsPayload(BaseModel):
+    total_matches: int
+    items: List[SearchResponseItem]
+
+
 class SearchResponse(BaseModel):
-    meta: Dict[str, Any]
-    results: List[SearchResponseItem]
+    results: ResultsPayload
 
 
 def read_csv_from_path(csv_path: str) -> pd.DataFrame:
@@ -85,35 +103,43 @@ def read_csv_from_path(csv_path: str) -> pd.DataFrame:
     return dataframe_loaded
 
 
-def detect_columns_from_dataframe(dataframe: pd.DataFrame) -> Dict[str, Optional[str]]:
+def detect_columns_from_dataframe_for_year(dataframe: pd.DataFrame, year_key: str) -> Dict[str, Optional[str]]:
     detected_name_column: Optional[str] = None
     detected_seat_column: Optional[str] = None
     detected_degree_column: Optional[str] = None
 
     column_names = list(dataframe.columns)
 
-    arabic_name_candidate = str(HEADERS_MAPPING.get("name", "")).strip().lower()
-    arabic_seat_candidate = str(HEADERS_MAPPING.get("seat", "")).strip().lower()
-    arabic_degree_candidate = str(HEADERS_MAPPING.get("degree", "")).strip().lower()
+    mapping_entry = DB_FILES.get(year_key, {})
+    mapping_headers = mapping_entry.get("headers", {})
 
-    english_name_keywords = ["name", "full_name", "student_name", "student", "candidate"]
-    english_seat_keywords = ["seat", "seat_no", "seat_number", "roll", "roll_no", "roll_number"]
-    english_degree_keywords = ["degree", "score", "marks", "mark", "result"]
+    arabic_or_custom_name_candidate = str(mapping_headers.get("name", "")).strip().lower()
+    arabic_or_custom_seat_candidate = str(mapping_headers.get("seat", "")).strip().lower()
+    arabic_or_custom_degree_candidate = str(mapping_headers.get("degree", "")).strip().lower()
+
+    english_name_keywords = ["name", "full_name", "student_name", "student", "candidate", "arabic_name"]
+    english_seat_keywords = ["seat", "seat_no", "seat_number", "roll", "roll_no", "roll_number", "seating_no"]
+    english_degree_keywords = ["degree", "score", "marks", "mark", "result", "total_degree"]
 
     for column_name in column_names:
         normalized_column = str(column_name).strip().lower()
 
         if detected_name_column is None:
-            exact_match_arabic_name = normalized_column == arabic_name_candidate and arabic_name_candidate != ""
-            contains_arabic_name = arabic_name_candidate in normalized_column and arabic_name_candidate != ""
+            exact_match_custom_name = normalized_column == arabic_or_custom_name_candidate and arabic_or_custom_name_candidate != ""
+            contains_custom_name = arabic_or_custom_name_candidate in normalized_column and arabic_or_custom_name_candidate != ""
+            contains_arabic_word_name = "اسم" in normalized_column
             exact_english_name = normalized_column in english_name_keywords
             contains_english_name = any(keyword in normalized_column for keyword in english_name_keywords)
 
-            if exact_match_arabic_name:
+            if exact_match_custom_name:
                 detected_name_column = column_name
                 continue
 
-            if contains_arabic_name:
+            if contains_custom_name:
+                detected_name_column = column_name
+                continue
+
+            if contains_arabic_word_name:
                 detected_name_column = column_name
                 continue
 
@@ -126,16 +152,21 @@ def detect_columns_from_dataframe(dataframe: pd.DataFrame) -> Dict[str, Optional
                 continue
 
         if detected_seat_column is None:
-            exact_match_arabic_seat = normalized_column == arabic_seat_candidate and arabic_seat_candidate != ""
-            contains_arabic_seat = arabic_seat_candidate in normalized_column and arabic_seat_candidate != ""
+            exact_match_custom_seat = normalized_column == arabic_or_custom_seat_candidate and arabic_or_custom_seat_candidate != ""
+            contains_custom_seat = arabic_or_custom_seat_candidate in normalized_column and arabic_or_custom_seat_candidate != ""
+            contains_arabic_word_seat = "جلوس" in normalized_column or "رقم" in normalized_column
             exact_english_seat = normalized_column in english_seat_keywords
             contains_english_seat = any(keyword in normalized_column for keyword in english_seat_keywords)
 
-            if exact_match_arabic_seat:
+            if exact_match_custom_seat:
                 detected_seat_column = column_name
                 continue
 
-            if contains_arabic_seat:
+            if contains_custom_seat:
+                detected_seat_column = column_name
+                continue
+
+            if contains_arabic_word_seat:
                 detected_seat_column = column_name
                 continue
 
@@ -148,16 +179,21 @@ def detect_columns_from_dataframe(dataframe: pd.DataFrame) -> Dict[str, Optional
                 continue
 
         if detected_degree_column is None:
-            exact_match_arabic_degree = normalized_column == arabic_degree_candidate and arabic_degree_candidate != ""
-            contains_arabic_degree = arabic_degree_candidate in normalized_column and arabic_degree_candidate != ""
+            exact_match_custom_degree = normalized_column == arabic_or_custom_degree_candidate and arabic_or_custom_degree_candidate != ""
+            contains_custom_degree = arabic_or_custom_degree_candidate in normalized_column and arabic_or_custom_degree_candidate != ""
+            contains_arabic_word_degree = "درجة" in normalized_column
             exact_english_degree = normalized_column in english_degree_keywords
             contains_english_degree = any(keyword in normalized_column for keyword in english_degree_keywords)
 
-            if exact_match_arabic_degree:
+            if exact_match_custom_degree:
                 detected_degree_column = column_name
                 continue
 
-            if contains_arabic_degree:
+            if contains_custom_degree:
+                detected_degree_column = column_name
+                continue
+
+            if contains_arabic_word_degree:
                 detected_degree_column = column_name
                 continue
 
@@ -172,21 +208,24 @@ def detect_columns_from_dataframe(dataframe: pd.DataFrame) -> Dict[str, Optional
     if detected_name_column is None:
         for column_name in column_names:
             normalized_column = str(column_name).strip().lower()
-            if "name" in normalized_column or "اسم" in normalized_column:
+            contains_name_word = "name" in normalized_column or "اسم" in normalized_column
+            if contains_name_word:
                 detected_name_column = column_name
                 break
 
     if detected_seat_column is None:
         for column_name in column_names:
             normalized_column = str(column_name).strip().lower()
-            if "seat" in normalized_column or "roll" in normalized_column or "جلوس" in normalized_column or "رقم" in normalized_column:
+            contains_seat_word = ("seat" in normalized_column) or ("roll" in normalized_column) or ("جلوس" in normalized_column) or ("رقم" in normalized_column)
+            if contains_seat_word:
                 detected_seat_column = column_name
                 break
 
     if detected_degree_column is None:
         for column_name in column_names:
             normalized_column = str(column_name).strip().lower()
-            if "deg" in normalized_column or "score" in normalized_column or "mark" in normalized_column or "درجة" in normalized_column:
+            contains_degree_word = ("deg" in normalized_column) or ("score" in normalized_column) or ("mark" in normalized_column) or ("درجة" in normalized_column)
+            if contains_degree_word:
                 detected_degree_column = column_name
                 break
 
@@ -197,16 +236,17 @@ def detect_columns_from_dataframe(dataframe: pd.DataFrame) -> Dict[str, Optional
     }
 
 
-def ensure_dataframe_loaded() -> None:
-    global DATAFRAME_IN_MEMORY
+def ensure_dataframe_loaded_for_year(year_key: str) -> None:
+    if year_key not in DB_FILES:
+        raise HTTPException(status_code=404, detail="Year not configured")
 
     with DATA_LOCK:
-        dataframe_is_none = DATAFRAME_IN_MEMORY is None
+        dataframe_is_none = DATAFRAME_CACHE.get(year_key) is None
 
     if dataframe_is_none:
-        csv_path_env = os.environ.get("DATABASE_CSV_PATH")
+        csv_path_env = DB_FILES[year_key].get("file")
         if csv_path_env is None:
-            csv_path_env = CSV_FILE_DEFAULT
+            raise FileNotFoundError("No file configured for year")
 
         file_exists_at_path = os.path.exists(csv_path_env)
         if not file_exists_at_path:
@@ -215,41 +255,64 @@ def ensure_dataframe_loaded() -> None:
         loaded_dataframe = read_csv_from_path(csv_path_env)
 
         with DATA_LOCK:
-            DATAFRAME_IN_MEMORY = loaded_dataframe
+            DATAFRAME_CACHE[year_key] = loaded_dataframe
 
 
 @app.on_event("startup")
-def load_data_on_startup() -> None:
-    try:
-        ensure_dataframe_loaded()
-    except FileNotFoundError:
-        pass
+def load_all_data_on_startup() -> None:
+    for year_key in DB_FILES.keys():
+        try:
+            ensure_dataframe_loaded_for_year(year_key)
+        except FileNotFoundError:
+            continue
 
 
 @app.post("/realode")
-def reload_csv_into_memory() -> Dict[str, Any]:
-    global DATAFRAME_IN_MEMORY
+def reload_all_csvs() -> Dict[str, Any]:
+    reloaded_info: Dict[str, Any] = {}
 
-    csv_path_env = os.environ.get("DATABASE_CSV_PATH")
-    if csv_path_env is None:
-        csv_path_env = CSV_FILE_DEFAULT
+    for year_key, config_entry in DB_FILES.items():
+        csv_path_for_year = config_entry.get("file")
 
-    file_exists_at_path = os.path.exists(csv_path_env)
+        file_exists_at_path = os.path.exists(csv_path_for_year)
+        if not file_exists_at_path:
+            reloaded_info[year_key] = {"ok": False, "error": "file_not_found"}
+            continue
+
+        dataframe_for_year = read_csv_from_path(csv_path_for_year)
+
+        with DATA_LOCK:
+            DATAFRAME_CACHE[year_key] = dataframe_for_year
+
+        loaded_rows_count = len(dataframe_for_year.index)
+        reloaded_info[year_key] = {"ok": True, "loaded_rows": loaded_rows_count}
+
+    response_payload = {"status": "ok", "details": reloaded_info}
+
+    return response_payload
+
+
+@app.post("/{year_key}/realode")
+def reload_csv_for_year(
+    year_key: str = Path(..., description="Year key to reload"),
+) -> Dict[str, Any]:
+    if year_key not in DB_FILES:
+        raise HTTPException(status_code=404, detail="Year not configured")
+
+    csv_path_for_year = DB_FILES[year_key].get("file")
+
+    file_exists_at_path = os.path.exists(csv_path_for_year)
     if not file_exists_at_path:
         raise HTTPException(status_code=404, detail="CSV file not found")
 
-    new_dataframe = read_csv_from_path(csv_path_env)
+    dataframe_for_year = read_csv_from_path(csv_path_for_year)
 
     with DATA_LOCK:
-        DATAFRAME_IN_MEMORY = new_dataframe
+        DATAFRAME_CACHE[year_key] = dataframe_for_year
 
-    loaded_rows_count = len(DATAFRAME_IN_MEMORY.index)
+    loaded_rows_count = len(dataframe_for_year.index)
 
-    response_payload = {
-        "status": "ok",
-        "message": "CSV reloaded into memory",
-        "loaded_rows": loaded_rows_count
-    }
+    response_payload = {"status": "ok", "loaded_rows": loaded_rows_count}
 
     return response_payload
 
@@ -285,17 +348,21 @@ def perform_seat_search(dataframe: pd.DataFrame, seat_column: str, search_term: 
     return limited_rows
 
 
-@app.get("/2024/search/{query}", response_model=SearchResponse)
-def search_2024_by_path(
+@app.get("/{year_key}/search/{query}", response_model=SearchResponse)
+def search_by_year_and_path(
+    year_key: str = Path(..., description="Year key to search"),
     query: str = Path(..., description="Search term (seat number or name)"),
-    limit: int = 100
+    limit: int = Query(100, ge=1, le=1000)
 ) -> Dict[str, Any]:
-    ensure_dataframe_loaded()
+    if year_key not in DB_FILES:
+        raise HTTPException(status_code=404, detail="Year not configured")
+
+    ensure_dataframe_loaded_for_year(year_key)
 
     with DATA_LOCK:
-        dataframe_copy = DATAFRAME_IN_MEMORY.copy()
+        dataframe_copy = DATAFRAME_CACHE[year_key].copy()
 
-    detected_columns = detect_columns_from_dataframe(dataframe_copy)
+    detected_columns = detect_columns_from_dataframe_for_year(dataframe_copy, year_key)
 
     name_column_detected = detected_columns.get("name_column")
     seat_column_detected = detected_columns.get("seat_column")
@@ -329,10 +396,12 @@ def search_2024_by_path(
             result_limit=limit
         )
 
+    total_matches_count = len(matched_frame.index)
+
     if matched_frame.empty:
-        results_list: List[Dict[str, Any]] = []
+        items_list: List[Dict[str, Any]] = []
     else:
-        results_list = []
+        items_list = []
         for _, row in matched_frame.iterrows():
             seat_value = None
             name_value = None
@@ -353,22 +422,15 @@ def search_2024_by_path(
                 "degree": degree_value
             }
 
-            results_list.append(item)
+            items_list.append(item)
 
-    total_matches_count = len(matched_frame.index)
+    results_payload = {
+        "total_matches": total_matches_count,
+        "items": items_list
+    }
 
     response_payload = {
-        "meta": {
-            "headers": HEADERS_MAPPING,
-            "max_degree": MAX_DEGREE_VALUE,
-            "columns_detected": {
-                "name_column": name_column_detected,
-                "seat_column": seat_column_detected,
-                "degree_column": degree_column_detected
-            },
-            "total_matches": total_matches_count
-        },
-        "results": results_list
+        "results": results_payload
     }
 
     return response_payload
